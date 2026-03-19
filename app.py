@@ -249,13 +249,8 @@ def get_all_type4_flags(threshold=8.0):
 # =============================================================================
 
 with st.sidebar:
-    st.markdown(f"""
-        <div style="text-align: center; padding: 20px 0;">
-            <span style="color: {GOLD}; font-size: 2rem; font-weight: 700; font-family: 'Lora', serif;">H-</span>
-            <span style="color: white; font-size: 2rem; font-weight: 700; font-family: 'Lora', serif;">EDU</span>
-            <p style="color: {GOLD}; font-size: 0.9rem; margin-top: 8px;">VERA Dashboard</p>
-        </div>
-    """, unsafe_allow_html=True)
+    # VERA Logo
+    st.image("vera_logo.png", use_container_width=True)
 
     st.markdown("---")
 
