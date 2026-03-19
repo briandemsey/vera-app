@@ -56,9 +56,18 @@ st.markdown(f"""
         flex-direction: column;
         gap: 8px;
     }}
-    section[data-testid="stSidebar"] .stRadio label {{
+    section[data-testid="stSidebar"] .stRadio label,
+    section[data-testid="stSidebar"] .stRadio label span,
+    section[data-testid="stSidebar"] .stRadio label p,
+    section[data-testid="stSidebar"] .stRadio label div,
+    section[data-testid="stSidebar"] .stRadio [data-testid="stMarkdownContainer"],
+    section[data-testid="stSidebar"] .stRadio [data-testid="stMarkdownContainer"] p {{
         color: white !important;
         font-size: 1rem;
+        position: relative;
+        z-index: 1;
+    }}
+    section[data-testid="stSidebar"] .stRadio label {{
         padding: 8px 12px;
         border-radius: 6px;
         cursor: pointer;
@@ -67,9 +76,12 @@ st.markdown(f"""
     section[data-testid="stSidebar"] .stRadio label:hover {{
         background-color: rgba(255,255,255,0.1);
     }}
-    section[data-testid="stSidebar"] .stRadio label[data-checked="true"] {{
-        background-color: {GOLD};
-        color: {NAVY} !important;
+    section[data-testid="stSidebar"] .stRadio input[type="radio"]:checked + div,
+    section[data-testid="stSidebar"] .stRadio input[type="radio"]:checked + div p,
+    section[data-testid="stSidebar"] .stRadio input[type="radio"]:checked ~ div,
+    section[data-testid="stSidebar"] .stRadio input[type="radio"]:checked ~ div p {{
+        color: {GOLD} !important;
+        font-weight: 600;
     }}
 
     /* Headers */
