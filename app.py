@@ -252,6 +252,22 @@ with st.sidebar:
     # VERA Logo
     st.image("vera_logo.png", use_container_width=True)
 
+    # Return to H-EDU link
+    st.markdown(f"""
+        <div style="text-align: center; margin: 10px 0;">
+            <a href="https://h-edu.solutions" target="_blank" style="
+                display: inline-block;
+                color: {GOLD};
+                text-decoration: none;
+                font-size: 0.85rem;
+                padding: 8px 16px;
+                border: 1px solid {GOLD};
+                border-radius: 4px;
+                transition: all 0.2s;
+            ">← Return to H-EDU</a>
+        </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("---")
 
     # Navigation
