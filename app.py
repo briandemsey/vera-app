@@ -9,6 +9,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
+import re
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime
 
 # =============================================================================
 # Configuration
@@ -163,6 +169,179 @@ st.markdown(f"""
     footer {{visibility: hidden;}}
 </style>
 """, unsafe_allow_html=True)
+
+# =============================================================================
+# Authentication System
+# =============================================================================
+
+# Password from environment variable (fallback for local dev)
+VERA_PASSWORD = os.environ.get("VERA_PASSWORD", "forever vera")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "brian@h-edu.solutions")
+
+# School board email domain patterns
+SCHOOL_DOMAIN_PATTERNS = [
+    r'.*\.k12\.[a-z]{2}\.us$',      # *.k12.CA.us, etc.
+    r'.*\.edu$',                     # *.edu
+    r'.*school.*\.[a-z]+$',          # *school*.com, etc.
+    r'.*district.*\.[a-z]+$',        # *district*.org, etc.
+    r'.*unified.*\.[a-z]+$',         # *unified*.org, etc.
+    r'.*usd\.[a-z]+$',               # *usd.org, etc.
+    r'.*isd\.[a-z]+$',               # *isd.org (independent school district)
+    r'.*coe\.[a-z]+$',               # county office of education
+    r'.*schools\.[a-z]+$',           # *schools.org
+]
+
+def is_school_email(email):
+    """Check if email domain matches school board patterns."""
+    if not email or '@' not in email:
+        return False
+    domain = email.lower().split('@')[1]
+    for pattern in SCHOOL_DOMAIN_PATTERNS:
+        if re.match(pattern, domain):
+            return True
+    return False
+
+def init_auth_db():
+    """Create access_requests table if it doesn't exist."""
+    db_path = Path(__file__).parent / "vera_demo.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS access_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            organization TEXT,
+            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'pending'
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_access_request(email, phone, organization=""):
+    """Save a new access request to the database."""
+    db_path = Path(__file__).parent / "vera_demo.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO access_requests (email, phone, organization) VALUES (?, ?, ?)",
+        (email, phone, organization)
+    )
+    conn.commit()
+    conn.close()
+
+def send_notification_email(email, phone, organization):
+    """Send email notification about new access request."""
+    try:
+        # Email configuration from environment variables
+        smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+        smtp_user = os.environ.get("SMTP_USER", "")
+        smtp_pass = os.environ.get("SMTP_PASS", "")
+
+        if not smtp_user or not smtp_pass:
+            # If no email configured, just log it
+            print(f"Access request: {email}, {phone}, {organization}")
+            return False
+
+        msg = MIMEMultipart()
+        msg['From'] = smtp_user
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = f"VERA Access Request: {email}"
+
+        body = f"""
+New VERA access request:
+
+Email: {email}
+Phone: {phone}
+Organization: {organization}
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+To grant access, share the password with this user.
+        """
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Email error: {e}")
+        return False
+
+def check_authentication():
+    """Display login page and check authentication."""
+
+    # Initialize auth database table
+    init_auth_db()
+
+    # Check if already authenticated
+    if st.session_state.get('authenticated', False):
+        return True
+
+    # Center the login form
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        st.image("vera_logo.png", use_container_width=True)
+        st.markdown(f"""
+            <h2 style="text-align: center; color: {NAVY}; margin-top: 20px;">
+                Welcome to VERA
+            </h2>
+            <p style="text-align: center; color: #666; margin-bottom: 30px;">
+                Verification Engine for Results & Accountability
+            </p>
+        """, unsafe_allow_html=True)
+
+        tab1, tab2 = st.tabs(["🔐 I Have Access", "📝 Request Access"])
+
+        with tab1:
+            st.markdown("Enter your password to access VERA.")
+            password = st.text_input("Password", type="password", key="login_password")
+
+            if st.button("Sign In", type="primary", use_container_width=True):
+                if password.lower().strip() == VERA_PASSWORD.lower():
+                    st.session_state['authenticated'] = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password. Please try again or request access.")
+
+        with tab2:
+            st.markdown("Request access to VERA. You must have a school board or educational institution email.")
+
+            with st.form("access_request_form"):
+                req_email = st.text_input("Email Address *", placeholder="you@yourdistrict.k12.ca.us")
+                req_phone = st.text_input("Phone Number *", placeholder="(555) 123-4567")
+                req_org = st.text_input("Organization/District", placeholder="Your School District")
+
+                submitted = st.form_submit_button("Request Access", type="primary", use_container_width=True)
+
+                if submitted:
+                    # Validate fields
+                    if not req_email or not req_phone:
+                        st.error("Please fill in all required fields.")
+                    elif not is_school_email(req_email):
+                        st.error("Please use an email address from a school board, district, or educational institution (.k12.ca.us, .edu, etc.)")
+                    else:
+                        # Save request and send notification
+                        save_access_request(req_email, req_phone, req_org)
+                        send_notification_email(req_email, req_phone, req_org)
+                        st.success("✅ Access request submitted! You will receive the password via email once approved.")
+
+        st.markdown(f"""
+            <div style="text-align: center; margin-top: 40px; padding-top: 20px; border-top: 1px solid #ddd;">
+                <a href="https://h-edu.solutions" style="color: {GOLD}; text-decoration: none;">
+                    ← Return to H-EDU.solutions
+                </a>
+            </div>
+        """, unsafe_allow_html=True)
+
+    return False
+
+# Check authentication before showing main app
+if not check_authentication():
+    st.stop()
 
 # =============================================================================
 # Database Connection
