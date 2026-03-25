@@ -458,7 +458,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["📊 District Dashboard", "🔍 Cross-District Scan", "📋 LCAP Report", "ℹ️ About VERA"],
+        ["📊 District Dashboard", "🔍 Cross-District Scan", "📋 LCAP Report", "📝 Student Record", "📅 Daily Observations", "ℹ️ About VERA"],
         label_visibility="collapsed",
         format_func=lambda x: x
     )
@@ -713,6 +713,49 @@ elif page == "📋 LCAP Report":
     # Calculate match rate (simplified)
     match_rate = max(0, 100 - (type4_count * 15))
 
+    # Pull observation data (Document 2)
+    db_path = Path(__file__).parent / "vera_demo.db"
+    obs_data = None
+    init_data = None
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+
+        # Get observation aggregates
+        obs_df = pd.read_sql_query("""
+            SELECT
+                COUNT(DISTINCT ssid) as students_observed,
+                COUNT(DISTINCT observation_date) as observation_days,
+                COUNT(*) as total_observations,
+                SUM(present) as total_present,
+                SUM(oral_participation) as total_oral,
+                SUM(written_output) as total_written,
+                SUM(concern_flag) as total_concerns,
+                SUM(CASE WHEN elaboration = 'Intervention responding' THEN 1 ELSE 0 END) as intervention_responding,
+                SUM(CASE WHEN elaboration = 'Intervention not responding' THEN 1 ELSE 0 END) as intervention_not_responding,
+                SUM(CASE WHEN elaboration = 'VERA hypothesis confirmed' THEN 1 ELSE 0 END) as vera_confirmed,
+                SUM(CASE WHEN elaboration = 'VERA hypothesis challenged' THEN 1 ELSE 0 END) as vera_challenged
+            FROM observations
+        """, conn)
+        if len(obs_df) > 0:
+            obs_data = obs_df.iloc[0].to_dict()
+
+        # Get initialization record summary
+        init_df = pd.read_sql_query("""
+            SELECT
+                COUNT(*) as total_records,
+                SUM(CASE WHEN locked_at IS NOT NULL THEN 1 ELSE 0 END) as locked_records,
+                SUM(CASE WHEN teacher_response = 'confirmed' THEN 1 ELSE 0 END) as hypothesis_confirmed,
+                SUM(CASE WHEN teacher_response = 'challenged' THEN 1 ELSE 0 END) as hypothesis_challenged
+            FROM initialization_records
+        """, conn)
+        if len(init_df) > 0:
+            init_data = init_df.iloc[0].to_dict()
+
+        conn.close()
+    except Exception:
+        pass
+
     # Gauge chart
     col1, col2 = st.columns([1, 1])
 
@@ -767,9 +810,57 @@ elif page == "📋 LCAP Report":
     else:
         st.error(f"**MATCH RATE: {match_rate}%** — Significant misalignment. Immediate review of LCAP spending recommended.")
 
+    # NEW: Document 1 & 2 Status
+    st.markdown("---")
+    st.markdown('<div class="section-header">Observation System Status</div>', unsafe_allow_html=True)
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        init_count = init_data.get('locked_records', 0) if init_data else 0
+        st.metric("Student Records Locked", init_count, help="Document 1 - Initialization records signed off")
+
+    with col2:
+        obs_students = obs_data.get('students_observed', 0) if obs_data else 0
+        st.metric("Students Observed", int(obs_students) if obs_students else 0, help="Document 2 - Daily observations")
+
+    with col3:
+        obs_days = obs_data.get('observation_days', 0) if obs_data else 0
+        st.metric("Observation Days", int(obs_days) if obs_days else 0)
+
+    with col4:
+        concerns = obs_data.get('total_concerns', 0) if obs_data else 0
+        st.metric("Concern Flags", int(concerns) if concerns else 0, delta="review" if concerns and concerns > 0 else None, delta_color="inverse")
+
+    # Oral vs Written Pattern
+    if obs_data and obs_data.get('total_present') and obs_data['total_present'] > 0:
+        oral_rate = (obs_data.get('total_oral', 0) / obs_data['total_present']) * 100
+        written_rate = (obs_data.get('total_written', 0) / obs_data['total_present']) * 100
+
+        st.markdown("**Participation Patterns (from daily observations):**")
+        pattern_cols = st.columns(2)
+        with pattern_cols[0]:
+            st.metric("Oral Participation Rate", f"{oral_rate:.0f}%")
+        with pattern_cols[1]:
+            st.metric("Written Output Rate", f"{written_rate:.0f}%")
+
+        if oral_rate > written_rate + 15:
+            st.warning("⚠️ **Pattern Alert:** Oral participation exceeds written output by >15% — confirms Type 4 indicators at classroom level.")
+
+    # Intervention Effectiveness
+    if obs_data:
+        responding = obs_data.get('intervention_responding', 0) or 0
+        not_responding = obs_data.get('intervention_not_responding', 0) or 0
+        if responding + not_responding > 0:
+            effectiveness = (responding / (responding + not_responding)) * 100
+            st.markdown("**Intervention Effectiveness (from teacher elaborations):**")
+            st.metric("Interventions Responding", f"{effectiveness:.0f}%", delta="good" if effectiveness >= 50 else "needs review", delta_color="normal" if effectiveness >= 50 else "inverse")
+
     # Report text
+    st.markdown("---")
     st.markdown('<div class="section-header">COE Submission Report</div>', unsafe_allow_html=True)
 
+    # Build enhanced report
     report_text = f"""
 ======================================================================
 LCAP VERIFICATION REPORT - H-EDU/VERA
@@ -781,18 +872,39 @@ District ID: {district_id}
 Report Date: {pd.Timestamp.now().strftime('%Y-%m-%d')}
 ----------------------------------------------------------------------
 
-GAP PROFILE SUMMARY
+SECTION 1: ASSESSMENT-BASED GAP PROFILE
   Total grade-subgroup combinations analyzed: {total_populations}
   Type 4 gaps detected (oral > written by 8+ pts): {type4_count}
-  Estimated LCAP-to-Need Match Rate: {match_rate}%
+  Assessment-based match rate: {match_rate}%
 
 {"ATTENTION REQUIRED:" if type4_count > 0 else ""}
 {"  " + str(type4_count) + " grade-subgroup combinations show significant" if type4_count > 0 else ""}
 {"  oral-written divergence. Review ELD intervention alignment." if type4_count > 0 else ""}
 
+SECTION 2: STUDENT INITIALIZATION RECORDS (Document 1)
+  Total records locked: {init_data.get('locked_records', 0) if init_data else 'N/A'}
+  VERA hypothesis confirmed: {init_data.get('hypothesis_confirmed', 0) if init_data else 'N/A'}
+  VERA hypothesis challenged: {init_data.get('hypothesis_challenged', 0) if init_data else 'N/A'}
+  SB 1288 Section C compliance: {'ACTIVE' if init_data and init_data.get('locked_records') else 'NOT STARTED'}
+
+SECTION 3: CLASSROOM OBSERVATIONS (Document 2)
+  Students observed: {int(obs_data.get('students_observed', 0)) if obs_data else 'N/A'}
+  Observation days: {int(obs_data.get('observation_days', 0)) if obs_data else 'N/A'}
+  Total observations: {int(obs_data.get('total_observations', 0)) if obs_data else 'N/A'}
+  Concern flags raised: {int(obs_data.get('total_concerns', 0)) if obs_data else 'N/A'}
+
+SECTION 4: INTERVENTION EFFECTIVENESS
+  Interventions responding: {int(obs_data.get('intervention_responding', 0)) if obs_data else 'N/A'}
+  Interventions not responding: {int(obs_data.get('intervention_not_responding', 0)) if obs_data else 'N/A'}
+
 NON-EVALUATION GUARANTEE:
   No teacher identity is attached to any result in this report.
   Match-rate data is aggregate only.
+
+----------------------------------------------------------------------
+The working group reports once and disbands.
+VERA reports continuously.
+The working group built the policy. VERA measures whether it works.
 ----------------------------------------------------------------------
 Generated by VERA - H-EDU Verification Engine
     """
@@ -861,3 +973,694 @@ elif page == "ℹ️ About VERA":
             </p>
         </div>
     """, unsafe_allow_html=True)
+
+# =============================================================================
+# Page: Student Initialization Record (Document 1)
+# =============================================================================
+
+elif page == "📝 Student Record":
+    st.title("Student Initialization Record")
+    st.markdown("*Document 1 — Day-One Student Record*")
+
+    # Initialize database tables if needed
+    def init_observation_tables():
+        db_path = Path(__file__).parent / "vera_demo.db"
+        conn = sqlite3.connect(str(db_path))
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS initialization_records (
+                record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ssid TEXT NOT NULL,
+                teacher_id TEXT NOT NULL,
+                district_id TEXT NOT NULL,
+                school_id TEXT,
+                school_year TEXT NOT NULL,
+                vera_hypothesis TEXT,
+                teacher_response TEXT,
+                teacher_notes TEXT,
+                intervention_assigned TEXT,
+                section_a_complete INTEGER DEFAULT 0,
+                section_b_complete INTEGER DEFAULT 0,
+                section_c_complete INTEGER DEFAULT 0,
+                section_d_complete INTEGER DEFAULT 0,
+                section_e_complete INTEGER DEFAULT 0,
+                locked_at TIMESTAMP,
+                locked_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ssid, school_year)
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    init_observation_tables()
+
+    # Session state for form
+    if 'init_record' not in st.session_state:
+        st.session_state.init_record = {
+            'section_a': {},
+            'section_b': {},
+            'section_c': {},
+            'section_d': {},
+            'section_e': {}
+        }
+
+    # Student selector
+    st.markdown("---")
+    col1, col2, col3 = st.columns([2, 2, 1])
+
+    with col1:
+        student_ssid = st.text_input("Student SSID", placeholder="Enter State Student ID")
+    with col2:
+        teacher_id = st.text_input("Teacher ID", value="demo_teacher")
+    with col3:
+        school_year = st.selectbox("School Year", ["2025-2026", "2024-2025", "2026-2027"])
+
+    if not student_ssid:
+        st.info("Enter a Student SSID to begin the initialization record.")
+        st.stop()
+
+    # Check if record exists and is locked
+    db_path = Path(__file__).parent / "vera_demo.db"
+    conn = sqlite3.connect(str(db_path))
+    existing = conn.execute(
+        "SELECT * FROM initialization_records WHERE ssid = ? AND school_year = ?",
+        (student_ssid, school_year)
+    ).fetchone()
+    conn.close()
+
+    if existing and existing[16]:  # locked_at field
+        st.warning(f"This record was locked on {existing[16]} and cannot be edited.")
+        st.markdown("**Document 2 (Daily Observations)** is now active for this student.")
+        st.stop()
+
+    st.markdown("---")
+
+    # Five-Section Checklist
+    st.markdown(f"""
+        <div style="background: {NAVY}; color: white; padding: 16px; border-radius: 4px; margin-bottom: 20px;">
+            <h3 style="color: {GOLD}; margin: 0;">Five-Section Initialization Checklist</h3>
+            <p style="margin: 8px 0 0 0; opacity: 0.8;">All sections must be completed before this record can be locked.</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # SECTION A: Record Verification
+    with st.expander("**Section A: Record Verification**", expanded=True):
+        st.markdown("*Verify student identity and administrative records*")
+
+        a1 = st.checkbox("Student name and SSID confirmed against roster", key="a1")
+        a2 = st.checkbox("Emergency contact and parent/guardian verified (Day 1 required)", key="a2")
+        a3 = st.checkbox("Home language survey reviewed (EL students)", key="a3")
+        a4 = st.checkbox("Immunization record on file (health office confirms)", key="a4")
+        a5 = st.checkbox("Special population flags reviewed and acknowledged", key="a5")
+
+        # Population flags display
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.checkbox("English Learner (EL)", key="flag_el")
+        with col2:
+            st.checkbox("IEP/504", key="flag_iep")
+        with col3:
+            st.checkbox("Foster Youth", key="flag_foster")
+        with col4:
+            st.checkbox("Socioeconomically Disadvantaged", key="flag_sed")
+
+        section_a_complete = all([a1, a2, a3, a4, a5])
+        if section_a_complete:
+            st.success("Section A complete")
+
+    # SECTION B: Assessment Data Review
+    with st.expander("**Section B: Assessment Data Review**", expanded=False):
+        st.markdown("*Review baseline assessment scores and VERA hypothesis*")
+
+        # Simulated VERA data pull (in production, this would come from CAASPP/ELPAC)
+        st.markdown("**CAASPP Scores (Auto-populated)**")
+        col1, col2 = st.columns(2)
+        with col1:
+            caaspp_ela = st.number_input("ELA Scale Score", value=2485, disabled=True)
+            ela_claim2 = st.number_input("ELA Claim 2 (Writing)", value=2470, disabled=True)
+        with col2:
+            caaspp_math = st.number_input("Math Scale Score", value=2510, disabled=True)
+
+        st.markdown("**ELPAC Scores (Auto-populated)**")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            elpac_oral = st.number_input("ELPAC Oral", value=2502, disabled=True)
+        with col2:
+            elpac_written = st.number_input("ELPAC Written", value=2465, disabled=True)
+        with col3:
+            delta = elpac_oral - ela_claim2
+            st.metric("Oral-Written Delta", f"{delta:+d}")
+            if delta > 8:
+                st.error("TYPE 4 FLAG")
+
+        st.markdown("---")
+        st.markdown("**VERA Starting Hypothesis**")
+        vera_hypothesis = "Type 4 candidate - oral language proficiency exceeds written. Consider writing-focused intervention rather than oral ELD." if delta > 8 else "No significant oral-written gap detected. Standard ELD pathway recommended."
+        st.info(vera_hypothesis)
+
+        b1 = st.checkbox("CAASPP ELA score reviewed", key="b1")
+        b2 = st.checkbox("ELPAC oral and written scores reviewed — delta confirmed", key="b2")
+        b3 = st.checkbox("CAASPP Math score reviewed", key="b3")
+        b4 = st.checkbox("Teacher acknowledges VERA finding and starting hypothesis (SB 1288 §C)", key="b4")
+
+        section_b_complete = all([b1, b2, b3, b4])
+        if section_b_complete:
+            st.success("Section B complete")
+
+    # SECTION C: Prior Intervention History
+    with st.expander("**Section C: Prior Intervention History**", expanded=False):
+        st.markdown("*Review what has been tried before*")
+
+        st.markdown("**Prior Teacher Summary (Auto-populated)**")
+        st.text_area(
+            "Previous teacher notes",
+            value="Student shows strong verbal participation in class discussions. Written work often incomplete or below grade level. Responded well to graphic organizers and sentence frames. Parent engaged and supportive.",
+            height=100,
+            disabled=True,
+            key="prior_summary"
+        )
+
+        st.markdown("**Prior Interventions**")
+        intervention_data = {
+            "Intervention": ["Small group ELD", "After-school tutoring", "Graphic organizers"],
+            "Duration": ["12 weeks", "8 weeks", "Ongoing"],
+            "Outcome": ["Partially effective", "Ineffective", "Effective"]
+        }
+        st.dataframe(intervention_data, use_container_width=True)
+
+        c1 = st.checkbox("Prior teacher summary read and acknowledged", key="c1")
+        c2 = st.checkbox("Prior intervention outcomes reviewed — effective interventions flagged", key="c2")
+
+        st.markdown("**LCAP Intervention Assignment**")
+        intervention_options = [
+            "Writing-focused ELD (VERA recommended)",
+            "Standard oral ELD",
+            "Integrated ELD",
+            "Designated ELD",
+            "After-school tutoring",
+            "Push-in support",
+            "Other"
+        ]
+        assigned_intervention = st.selectbox("Confirm or modify intervention assignment", intervention_options, key="intervention")
+        c3 = st.checkbox("LCAP intervention assignment confirmed or modified (human approval required)", key="c3")
+
+        section_c_complete = all([c1, c2, c3])
+        if section_c_complete:
+            st.success("Section C complete")
+
+    # SECTION D: Equity and Access
+    with st.expander("**Section D: Equity and Access**", expanded=False):
+        st.markdown("*Verify equitable access to resources (SB 1288 Section E)*")
+
+        d1 = st.checkbox("Device access confirmed (1:1 device or daily access verified)", key="d1")
+
+        st.markdown("**AI Literacy Status (New 2026 — SB 1288 §E)**")
+        ai_literacy = st.selectbox(
+            "AI literacy instruction received",
+            ["Not yet started", "In progress", "Completed - basic", "Completed - advanced"],
+            key="ai_literacy"
+        )
+        d2 = st.checkbox("AI literacy instruction status reviewed", key="d2")
+
+        d3 = st.checkbox("Free/Reduced meal eligibility confirmed", key="d3")
+
+        section_d_complete = all([d1, d2, d3])
+        if section_d_complete:
+            st.success("Section D complete")
+
+    # SECTION E: Day-One Starting Plan
+    with st.expander("**Section E: Day-One Starting Plan**", expanded=False):
+        st.markdown("*Final review and sign-off — THIS LOCKS THE RECORD*")
+
+        st.markdown("**VERA Starting Hypothesis**")
+        st.info(vera_hypothesis)
+
+        teacher_response = st.radio(
+            "Teacher response to VERA hypothesis",
+            ["Confirmed — I agree with VERA's assessment",
+             "Challenged — I disagree based on my observation",
+             "Modified — I accept with adjustments"],
+            key="teacher_response"
+        )
+
+        if "Challenged" in teacher_response or "Modified" in teacher_response:
+            teacher_notes = st.text_area(
+                "Explain your challenge or modification",
+                placeholder="Provide rationale for disagreeing with or modifying VERA's hypothesis...",
+                key="teacher_notes"
+            )
+        else:
+            teacher_notes = ""
+
+        e1 = st.checkbox("VERA starting hypothesis accepted or challenged", key="e1")
+        e2 = st.checkbox("I understand this record will be LOCKED permanently upon submission", key="e2")
+
+        section_e_complete = all([e1, e2])
+        if section_e_complete:
+            st.success("Section E complete — Ready to lock")
+
+    # Summary and Submit
+    st.markdown("---")
+    st.markdown("### Checklist Summary")
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        if section_a_complete:
+            st.success("A ✓")
+        else:
+            st.error("A ○")
+    with col2:
+        if section_b_complete:
+            st.success("B ✓")
+        else:
+            st.error("B ○")
+    with col3:
+        if section_c_complete:
+            st.success("C ✓")
+        else:
+            st.error("C ○")
+    with col4:
+        if section_d_complete:
+            st.success("D ✓")
+        else:
+            st.error("D ○")
+    with col5:
+        if section_e_complete:
+            st.success("E ✓")
+        else:
+            st.error("E ○")
+
+    all_complete = all([section_a_complete, section_b_complete, section_c_complete,
+                        section_d_complete, section_e_complete])
+
+    if all_complete:
+        st.markdown(f"""
+            <div style="background: {GREEN}; color: white; padding: 16px; border-radius: 4px; margin: 20px 0;">
+                <strong>All sections complete.</strong> This record is ready to be locked.
+            </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("🔒 LOCK RECORD & OPEN DOCUMENT 2", type="primary", use_container_width=True):
+            # Save to database
+            db_path = Path(__file__).parent / "vera_demo.db"
+            conn = sqlite3.connect(str(db_path))
+
+            # Map teacher response
+            response_map = {
+                "Confirmed — I agree with VERA's assessment": "confirmed",
+                "Challenged — I disagree based on my observation": "challenged",
+                "Modified — I accept with adjustments": "modified"
+            }
+
+            conn.execute("""
+                INSERT INTO initialization_records
+                (ssid, teacher_id, district_id, school_year, vera_hypothesis, teacher_response,
+                 teacher_notes, intervention_assigned, section_a_complete, section_b_complete,
+                 section_c_complete, section_d_complete, section_e_complete, locked_at, locked_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, 1, datetime('now'), ?)
+                ON CONFLICT(ssid, school_year) DO UPDATE SET
+                    vera_hypothesis = excluded.vera_hypothesis,
+                    teacher_response = excluded.teacher_response,
+                    teacher_notes = excluded.teacher_notes,
+                    intervention_assigned = excluded.intervention_assigned,
+                    section_a_complete = 1,
+                    section_b_complete = 1,
+                    section_c_complete = 1,
+                    section_d_complete = 1,
+                    section_e_complete = 1,
+                    locked_at = datetime('now'),
+                    locked_by = excluded.locked_by,
+                    updated_at = datetime('now')
+            """, (
+                student_ssid,
+                teacher_id,
+                "demo_district",
+                school_year,
+                vera_hypothesis,
+                response_map.get(teacher_response, "confirmed"),
+                teacher_notes,
+                assigned_intervention,
+                teacher_id
+            ))
+            conn.commit()
+            conn.close()
+
+            st.success("✅ Record LOCKED. Document 2 (Daily Observations) is now active.")
+            st.balloons()
+            st.info("Navigate to **📅 Daily Observations** to begin recording daily observations for this student.")
+    else:
+        st.warning("Complete all five sections to lock this record.")
+        st.markdown("*Nothing in VERA activates until the teacher signs off on Section E. This is the human approval gate required by SB 1288 Section C.*")
+
+# =============================================================================
+# Page: Daily Observations (Document 2)
+# =============================================================================
+
+elif page == "📅 Daily Observations":
+    st.title("Daily Classroom Observations")
+    st.markdown("*Document 2 — Ongoing Observation Log*")
+
+    # Initialize observations table
+    def init_observations_table():
+        db_path = Path(__file__).parent / "vera_demo.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS observations (
+                record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                teacher_id TEXT NOT NULL,
+                district_id TEXT NOT NULL,
+                school_id TEXT,
+                class_period TEXT,
+                observation_date DATE NOT NULL,
+                ssid TEXT NOT NULL,
+                present INTEGER DEFAULT 0,
+                oral_participation INTEGER DEFAULT 0,
+                written_output INTEGER DEFAULT 0,
+                engaged INTEGER DEFAULT 0,
+                concern_flag INTEGER DEFAULT 0,
+                absent INTEGER DEFAULT 0,
+                elaboration TEXT,
+                oral_quality TEXT,
+                written_quality TEXT,
+                intervention_response TEXT,
+                note TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(teacher_id, observation_date, ssid, class_period)
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    init_observations_table()
+
+    # Demo student roster (in production, pulled from initialization_records)
+    DEMO_ROSTER = [
+        {"ssid": "1001", "name": "Garcia, Maria", "flag": "EL", "type4": True},
+        {"ssid": "1002", "name": "Johnson, Michael", "flag": None, "type4": False},
+        {"ssid": "1003", "name": "Chen, David", "flag": "EL", "type4": True},
+        {"ssid": "1004", "name": "Williams, Jasmine", "flag": "IEP", "type4": False},
+        {"ssid": "1005", "name": "Martinez, Carlos", "flag": "EL", "type4": False},
+        {"ssid": "1006", "name": "Brown, Ashley", "flag": None, "type4": False},
+        {"ssid": "1007", "name": "Nguyen, Tommy", "flag": "EL", "type4": True},
+        {"ssid": "1008", "name": "Davis, Brandon", "flag": "SED", "type4": False},
+        {"ssid": "1009", "name": "Lopez, Sofia", "flag": "EL", "type4": False},
+        {"ssid": "1010", "name": "Wilson, Tyler", "flag": "IEP", "type4": False},
+    ]
+
+    # Elaboration options
+    ELABORATION_OPTIONS = [
+        "",
+        "Strong oral response",
+        "Oral prompting needed",
+        "Written output strong",
+        "Written output emerging",
+        "Oral exceeds written",
+        "Written exceeds oral",
+        "Off task redirected",
+        "VERA hypothesis confirmed",
+        "VERA hypothesis challenged",
+        "Intervention responding",
+        "Intervention not responding",
+        "Parent contact needed",
+        "Referral recommended",
+        "Academic vocabulary used",
+        "Peer collaboration strong",
+        "Peer collaboration needed",
+        "Assessment accommodation used",
+        "Other"
+    ]
+
+    # Header controls
+    st.markdown("---")
+    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
+
+    with col1:
+        teacher_id = st.text_input("Teacher ID", value="demo_teacher", key="obs_teacher")
+    with col2:
+        class_period = st.selectbox("Class Period", ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6"], key="obs_period")
+    with col3:
+        observation_date = st.date_input("Date", value=datetime.now(), key="obs_date")
+    with col4:
+        if st.button("Mark All Present", use_container_width=True):
+            for i, student in enumerate(DEMO_ROSTER):
+                st.session_state[f"present_{student['ssid']}"] = True
+                st.session_state[f"absent_{student['ssid']}"] = False
+
+    st.markdown("---")
+
+    # Legend
+    st.markdown(f"""
+        <div style="display: flex; gap: 20px; margin-bottom: 16px; font-size: 0.85rem;">
+            <span><span style="color: #FFA500; font-weight: bold;">●</span> Type 4 (Oral > Written)</span>
+            <span><span style="color: #4CAF50; font-weight: bold;">●</span> EL</span>
+            <span><span style="color: #2196F3; font-weight: bold;">●</span> IEP</span>
+            <span><span style="color: #9C27B0; font-weight: bold;">●</span> SED</span>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # Column headers
+    header_cols = st.columns([3, 1, 1, 1, 1, 1, 1, 3, 3])
+    with header_cols[0]:
+        st.markdown("**Student**")
+    with header_cols[1]:
+        st.markdown("**P**")
+    with header_cols[2]:
+        st.markdown("**Or**")
+    with header_cols[3]:
+        st.markdown("**Wr**")
+    with header_cols[4]:
+        st.markdown("**En**")
+    with header_cols[5]:
+        st.markdown("**!**")
+    with header_cols[6]:
+        st.markdown("**Ab**")
+    with header_cols[7]:
+        st.markdown("**Elaboration**")
+    with header_cols[8]:
+        st.markdown("**Note**")
+
+    st.markdown("---")
+
+    # Student roster rows
+    observations_data = []
+
+    for student in DEMO_ROSTER:
+        ssid = student['ssid']
+
+        # Color dot based on flags
+        if student['type4']:
+            dot = '<span style="color: #FFA500; font-weight: bold;">●</span>'
+        elif student['flag'] == 'EL':
+            dot = '<span style="color: #4CAF50; font-weight: bold;">●</span>'
+        elif student['flag'] == 'IEP':
+            dot = '<span style="color: #2196F3; font-weight: bold;">●</span>'
+        elif student['flag'] == 'SED':
+            dot = '<span style="color: #9C27B0; font-weight: bold;">●</span>'
+        else:
+            dot = '<span style="color: #888;">○</span>'
+
+        cols = st.columns([3, 1, 1, 1, 1, 1, 1, 3, 3])
+
+        with cols[0]:
+            st.markdown(f"{dot} {student['name']}", unsafe_allow_html=True)
+
+        with cols[1]:
+            present = st.checkbox("P", key=f"present_{ssid}", label_visibility="collapsed")
+
+        with cols[2]:
+            oral = st.checkbox("Or", key=f"oral_{ssid}", label_visibility="collapsed")
+
+        with cols[3]:
+            written = st.checkbox("Wr", key=f"written_{ssid}", label_visibility="collapsed")
+
+        with cols[4]:
+            engaged = st.checkbox("En", key=f"engaged_{ssid}", label_visibility="collapsed")
+
+        with cols[5]:
+            concern = st.checkbox("!", key=f"concern_{ssid}", label_visibility="collapsed")
+
+        with cols[6]:
+            absent = st.checkbox("Ab", key=f"absent_{ssid}", label_visibility="collapsed")
+
+        with cols[7]:
+            elaboration = st.selectbox(
+                "Elab",
+                ELABORATION_OPTIONS,
+                key=f"elab_{ssid}",
+                label_visibility="collapsed"
+            )
+
+        with cols[8]:
+            note = st.text_input("Note", key=f"note_{ssid}", label_visibility="collapsed", placeholder="...")
+
+        # Concern flag expansion
+        if concern:
+            with st.expander(f"⚠️ Concern details for {student['name']}", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    oral_quality = st.selectbox(
+                        "Oral language quality",
+                        ["", "Sentence-level", "Paragraph-level", "Academic vocabulary", "Single words only"],
+                        key=f"oral_qual_{ssid}"
+                    )
+                with c2:
+                    written_quality = st.selectbox(
+                        "Written output quality",
+                        ["", "Full sentences", "Sentence fragments", "Key words only", "No written output"],
+                        key=f"written_qual_{ssid}"
+                    )
+                with c3:
+                    intervention_resp = st.selectbox(
+                        "Intervention response",
+                        ["", "Responding well", "Partially responding", "Not responding", "Not yet active"],
+                        key=f"interv_resp_{ssid}"
+                    )
+        else:
+            oral_quality = ""
+            written_quality = ""
+            intervention_resp = ""
+
+        # Collect data
+        observations_data.append({
+            "ssid": ssid,
+            "present": 1 if present and not absent else 0,
+            "oral_participation": 1 if oral else 0,
+            "written_output": 1 if written else 0,
+            "engaged": 1 if engaged else 0,
+            "concern_flag": 1 if concern else 0,
+            "absent": 1 if absent else 0,
+            "elaboration": elaboration if elaboration else None,
+            "oral_quality": oral_quality if oral_quality else None,
+            "written_quality": written_quality if written_quality else None,
+            "intervention_response": intervention_resp if intervention_resp else None,
+            "note": note if note else None
+        })
+
+    # Aggregation bar
+    st.markdown("---")
+    st.markdown(f"""
+        <div style="background: {NAVY}; color: white; padding: 16px; border-radius: 4px;">
+            <h4 style="color: {GOLD}; margin: 0 0 12px 0;">Today's Aggregation</h4>
+        </div>
+    """, unsafe_allow_html=True)
+
+    total_students = len(DEMO_ROSTER)
+    present_count = sum(1 for o in observations_data if o['present'])
+    absent_count = sum(1 for o in observations_data if o['absent'])
+    oral_count = sum(1 for o in observations_data if o['oral_participation'])
+    written_count = sum(1 for o in observations_data if o['written_output'])
+    engaged_count = sum(1 for o in observations_data if o['engaged'])
+    concern_count = sum(1 for o in observations_data if o['concern_flag'])
+
+    agg_cols = st.columns(6)
+    with agg_cols[0]:
+        st.metric("Present", f"{present_count}/{total_students}")
+    with agg_cols[1]:
+        st.metric("Absent", absent_count)
+    with agg_cols[2]:
+        st.metric("Oral", oral_count)
+    with agg_cols[3]:
+        st.metric("Written", written_count)
+    with agg_cols[4]:
+        st.metric("Engaged", engaged_count)
+    with agg_cols[5]:
+        st.metric("Concerns", concern_count, delta=None if concern_count == 0 else "flag", delta_color="inverse")
+
+    # Oral vs Written pattern detection
+    if present_count > 0:
+        oral_rate = (oral_count / present_count) * 100
+        written_rate = (written_count / present_count) * 100
+
+        if oral_rate > written_rate + 15:
+            st.warning(f"⚠️ **Pattern detected:** Oral participation ({oral_rate:.0f}%) exceeds written output ({written_rate:.0f}%) by >15%. This may indicate Type 4 characteristics at class level.")
+
+    # Submit button
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("💾 SUBMIT OBSERVATIONS", type="primary", use_container_width=True):
+            db_path = Path(__file__).parent / "vera_demo.db"
+            conn = sqlite3.connect(str(db_path))
+
+            records_saved = 0
+            for obs in observations_data:
+                try:
+                    conn.execute("""
+                        INSERT INTO observations
+                        (teacher_id, district_id, class_period, observation_date, ssid,
+                         present, oral_participation, written_output, engaged,
+                         concern_flag, absent, elaboration, oral_quality, written_quality,
+                         intervention_response, note)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(teacher_id, observation_date, ssid, class_period)
+                        DO UPDATE SET
+                            present = excluded.present,
+                            oral_participation = excluded.oral_participation,
+                            written_output = excluded.written_output,
+                            engaged = excluded.engaged,
+                            concern_flag = excluded.concern_flag,
+                            absent = excluded.absent,
+                            elaboration = excluded.elaboration,
+                            oral_quality = excluded.oral_quality,
+                            written_quality = excluded.written_quality,
+                            intervention_response = excluded.intervention_response,
+                            note = excluded.note
+                    """, (
+                        teacher_id,
+                        "demo_district",
+                        class_period,
+                        observation_date.strftime("%Y-%m-%d"),
+                        obs['ssid'],
+                        obs['present'],
+                        obs['oral_participation'],
+                        obs['written_output'],
+                        obs['engaged'],
+                        obs['concern_flag'],
+                        obs['absent'],
+                        obs['elaboration'],
+                        obs['oral_quality'],
+                        obs['written_quality'],
+                        obs['intervention_response'],
+                        obs['note']
+                    ))
+                    records_saved += 1
+                except Exception as e:
+                    st.error(f"Error saving {obs['ssid']}: {e}")
+
+            conn.commit()
+            conn.close()
+
+            st.success(f"✅ {records_saved} observations saved for {observation_date.strftime('%Y-%m-%d')} - {class_period}")
+            st.balloons()
+
+    # Show recent observations summary
+    st.markdown("---")
+    st.markdown("### Recent Observation History")
+
+    db_path = Path(__file__).parent / "vera_demo.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        history_df = pd.read_sql_query("""
+            SELECT observation_date, class_period,
+                   COUNT(*) as students,
+                   SUM(present) as present,
+                   SUM(oral_participation) as oral,
+                   SUM(written_output) as written,
+                   SUM(concern_flag) as concerns
+            FROM observations
+            WHERE teacher_id = ?
+            GROUP BY observation_date, class_period
+            ORDER BY observation_date DESC, class_period
+            LIMIT 10
+        """, conn, params=[teacher_id])
+
+        if len(history_df) > 0:
+            st.dataframe(history_df, use_container_width=True)
+        else:
+            st.info("No observation history yet. Submit your first observations above.")
+    except Exception as e:
+        st.info("No observation history yet.")
+    finally:
+        conn.close()
