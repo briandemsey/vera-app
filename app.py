@@ -1,6 +1,6 @@
 """
 VERA - Verification Engine for Results & Accountability
-Streamlit Web Application for H-EDU
+Streamlit Web Application for H-EDU (California)
 """
 
 import streamlit as st
