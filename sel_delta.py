@@ -23,7 +23,12 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from fastmcp import FastMCP
+
+# FastMCP is optional - only needed for MCP server, not Streamlit app
+try:
+    from fastmcp import FastMCP
+except ImportError:
+    FastMCP = None  # Running in Streamlit mode without MCP
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -466,7 +471,7 @@ def _compute_and_store(district_id: str, year: int,
 
 # ── Tool Registration ─────────────────────────────────────────────────────────
 
-def register_sel_delta_tools(mcp: FastMCP):
+def register_sel_delta_tools(mcp):
     """
     Register all SEL Δ MCP tools with the FastMCP server instance.
     Call this after init_sel_delta_schema() in vera_mcp_server.py.
