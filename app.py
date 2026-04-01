@@ -458,7 +458,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["📊 District Dashboard", "🔍 Cross-District Scan", "📋 LCAP Report", "🏫 Admin Dashboard", "📝 Student Record", "📅 Daily Observations", "ℹ️ About VERA"],
+        ["📊 District Dashboard", "📈 SEL Delta", "🔍 Cross-District Scan", "📋 LCAP Report", "🏫 Admin Dashboard", "📝 Student Record", "📅 Daily Observations", "ℹ️ About VERA"],
         label_visibility="collapsed",
         format_func=lambda x: x
     )
@@ -487,7 +487,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(f"""
         <p style="color: rgba(255,255,255,0.5); font-size: 0.8rem; text-align: center;">
-            VERA v1.0<br>
+            VERA v2.0<br>
             <a href="https://h-edu.solutions" style="color: {GOLD};">h-edu.solutions</a>
         </p>
     """, unsafe_allow_html=True)
@@ -607,6 +607,378 @@ if page == "📊 District Dashboard":
         )
     else:
         st.info("No data available for the selected filters.")
+
+# =============================================================================
+# Page: SEL Delta
+# =============================================================================
+
+elif page == "📈 SEL Delta":
+    st.title("SEL Δ — Investment vs. Outcome Gap")
+    st.markdown("*Measures the distance between what districts invest in SEL and what students show in outcomes*")
+
+    # Import SEL Delta functions
+    from sel_delta import (
+        _compute_and_store, _score_investment, _score_outcome,
+        _context_adjustment, init_sel_delta_schema, DB_PATH
+    )
+    import sqlite3 as sql3
+
+    # Ensure schema is initialized
+    init_sel_delta_schema()
+
+    # Zone colors
+    ZONE_COLORS = {
+        "outperforming": "#1A5C38",  # Green
+        "aligned": "#2196F3",         # Blue
+        "lagging": "#FFA500",         # Orange/Gold
+        "disconnected": "#8B2A2A"     # Red
+    }
+
+    ZONE_EMOJI = {
+        "outperforming": "🟢",
+        "aligned": "🔵",
+        "lagging": "🟡",
+        "disconnected": "🔴"
+    }
+
+    # Get all districts and compute SEL Delta
+    conn = sql3.connect(str(DB_PATH))
+    conn.row_factory = sql3.Row
+
+    districts_df = pd.read_sql_query("SELECT district_id, district_name, county FROM districts", conn)
+
+    results = []
+    for _, row in districts_df.iterrows():
+        try:
+            r = _compute_and_store(row['district_id'], 2025, conn)
+            r['district_name'] = row['district_name']
+            r['county'] = row['county']
+            results.append(r)
+        except Exception:
+            pass
+
+    conn.commit()
+    conn.close()
+
+    # Sort by SEL Delta (most disconnected first)
+    results.sort(key=lambda x: x['sel_delta'], reverse=True)
+
+    # Summary stats
+    col1, col2, col3, col4 = st.columns(4)
+
+    lagging_count = sum(1 for r in results if r['zone'] == 'lagging')
+    aligned_count = sum(1 for r in results if r['zone'] == 'aligned')
+    outperforming_count = sum(1 for r in results if r['zone'] == 'outperforming')
+    disconnected_count = sum(1 for r in results if r['zone'] == 'disconnected')
+
+    with col1:
+        st.markdown(f"""
+            <div class="stat-card">
+                <div class="number" style="color: {ZONE_COLORS['lagging']};">{lagging_count}</div>
+                <div class="label">Lagging Districts</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+            <div class="stat-card">
+                <div class="number" style="color: {ZONE_COLORS['aligned']};">{aligned_count}</div>
+                <div class="label">Aligned Districts</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+    with col3:
+        st.markdown(f"""
+            <div class="stat-card">
+                <div class="number" style="color: {ZONE_COLORS['outperforming']};">{outperforming_count}</div>
+                <div class="label">Outperforming</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+    with col4:
+        avg_delta = sum(r['sel_delta'] for r in results) / len(results) if results else 0
+        st.markdown(f"""
+            <div class="stat-card">
+                <div class="number">{avg_delta:+.1f}</div>
+                <div class="label">Avg SEL Δ</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+    # Zone explanation
+    st.markdown("---")
+    st.markdown("""
+    **SEL Δ Zones:**
+    - 🟢 **Outperforming** (Δ < -10): Outcomes exceed investment — study this district
+    - 🔵 **Aligned** (-10 to +10): Investment and outcomes tracking together
+    - 🟡 **Lagging** (+10 to +25): Outcomes behind investment — investigate fidelity
+    - 🔴 **Disconnected** (> +25): Significant gap — data, delivery, or measurement failure
+    """)
+
+    # System Overview Table
+    st.markdown('<div class="section-header">System Overview — All Districts</div>', unsafe_allow_html=True)
+
+    if results:
+        display_data = []
+        for r in results:
+            display_data.append({
+                "District": r['district_name'],
+                "County": r['county'],
+                "Investment": f"{r['investment_index']:.1f}",
+                "Outcome": f"{r['outcome_index']:.1f}",
+                "SEL Δ": f"{r['sel_delta']:+.1f}",
+                "Zone": f"{ZONE_EMOJI.get(r['zone'], '⚪')} {r['zone'].title()}"
+            })
+
+        display_df = pd.DataFrame(display_data)
+
+        # Highlight rows by zone
+        def highlight_zone(row):
+            zone = row['Zone'].split()[-1].lower()
+            if zone == 'lagging':
+                return ['background-color: #FFF3E0'] * len(row)
+            elif zone == 'disconnected':
+                return ['background-color: #FFEBEE'] * len(row)
+            elif zone == 'outperforming':
+                return ['background-color: #E8F5E9'] * len(row)
+            return [''] * len(row)
+
+        st.dataframe(
+            display_df.style.apply(highlight_zone, axis=1),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # Visualization: Investment vs Outcome scatter
+        st.markdown('<div class="section-header">Investment vs. Outcome</div>', unsafe_allow_html=True)
+
+        scatter_df = pd.DataFrame(results)
+        scatter_df['zone_color'] = scatter_df['zone'].map(ZONE_COLORS)
+
+        fig = go.Figure()
+
+        for zone in ['outperforming', 'aligned', 'lagging', 'disconnected']:
+            zone_data = scatter_df[scatter_df['zone'] == zone]
+            if len(zone_data) > 0:
+                fig.add_trace(go.Scatter(
+                    x=zone_data['investment_index'],
+                    y=zone_data['outcome_index'],
+                    mode='markers+text',
+                    marker=dict(size=15, color=ZONE_COLORS[zone]),
+                    text=zone_data['district_name'].str.split().str[0],  # First word of name
+                    textposition='top center',
+                    name=zone.title(),
+                    hovertemplate='<b>%{customdata[0]}</b><br>Investment: %{x:.1f}<br>Outcome: %{y:.1f}<br>SEL Δ: %{customdata[1]:+.1f}<extra></extra>',
+                    customdata=list(zip(zone_data['district_name'], zone_data['sel_delta']))
+                ))
+
+        # Add diagonal reference line (perfect alignment)
+        fig.add_trace(go.Scatter(
+            x=[0, 100],
+            y=[0, 100],
+            mode='lines',
+            line=dict(dash='dash', color='gray'),
+            name='Perfect Alignment',
+            showlegend=True
+        ))
+
+        fig.update_layout(
+            xaxis_title='Investment Index (0-100)',
+            yaxis_title='Outcome Index (0-100)',
+            plot_bgcolor='white',
+            height=500,
+            xaxis=dict(range=[0, 105]),
+            yaxis=dict(range=[0, 105])
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # District Detail Section
+        st.markdown("---")
+        st.markdown('<div class="section-header">District Detail</div>', unsafe_allow_html=True)
+
+        selected_district_name = st.selectbox(
+            "Select a district for detailed SEL Δ analysis",
+            [r['district_name'] for r in results],
+            key="sel_delta_district"
+        )
+
+        selected = next((r for r in results if r['district_name'] == selected_district_name), None)
+
+        if selected:
+            # Get detailed data
+            conn = sql3.connect(str(DB_PATH))
+            conn.row_factory = sql3.Row
+
+            inv = conn.execute(
+                "SELECT * FROM sel_investment WHERE district_id=? AND year=2025",
+                (selected['district_id'],)
+            ).fetchone()
+
+            out = conn.execute(
+                "SELECT * FROM sel_outcomes WHERE district_id=? AND year=2025",
+                (selected['district_id'],)
+            ).fetchone()
+
+            ctx = conn.execute(
+                "SELECT * FROM district_context WHERE district_id=?",
+                (selected['district_id'],)
+            ).fetchone()
+
+            conn.close()
+
+            # Zone interpretation
+            zone_desc = {
+                "outperforming": "This district's outcomes EXCEED what its investment level predicts. Study what they're doing.",
+                "aligned": "Investment and outcomes are tracking together appropriately. Stay the course.",
+                "lagging": "Outcomes are BEHIND what investment should produce. Investigate delivery fidelity.",
+                "disconnected": "Significant gap between investment and outcomes. Immediate review needed."
+            }
+
+            # Display
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown(f"### {selected_district_name}")
+                st.markdown(f"**County:** {selected['county']}")
+                st.markdown(f"**District ID:** `{selected['district_id']}`")
+
+                zone_color = ZONE_COLORS.get(selected['zone'], NAVY)
+                st.markdown(f"""
+                    <div style="background: {zone_color}; color: white; padding: 16px; border-radius: 4px; margin: 16px 0;">
+                        <h3 style="margin: 0; color: white;">SEL Δ: {selected['sel_delta']:+.1f}</h3>
+                        <p style="margin: 8px 0 0 0; opacity: 0.9;">{ZONE_EMOJI.get(selected['zone'], '')} {selected['zone'].upper()}</p>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                st.info(zone_desc.get(selected['zone'], ''))
+
+            with col2:
+                # Gauge chart for SEL Delta
+                fig = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=selected['sel_delta'],
+                    domain={'x': [0, 1], 'y': [0, 1]},
+                    title={'text': "SEL Δ"},
+                    gauge={
+                        'axis': {'range': [-30, 40]},
+                        'bar': {'color': zone_color},
+                        'steps': [
+                            {'range': [-30, -10], 'color': '#D5F5E3'},  # Outperforming
+                            {'range': [-10, 10], 'color': '#BBDEFB'},   # Aligned
+                            {'range': [10, 25], 'color': '#FFE0B2'},    # Lagging
+                            {'range': [25, 40], 'color': '#FFCDD2'}     # Disconnected
+                        ],
+                        'threshold': {
+                            'line': {'color': "black", 'width': 2},
+                            'thickness': 0.75,
+                            'value': selected['sel_delta']
+                        }
+                    }
+                ))
+                fig.update_layout(height=250)
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Investment breakdown
+            st.markdown("#### Investment Index Breakdown")
+            if inv:
+                inv_cols = st.columns(5)
+                with inv_cols[0]:
+                    prog = "✓" if inv['program_name'] else "✗"
+                    st.metric("Program", prog, help=inv['program_name'] or "None identified")
+                with inv_cols[1]:
+                    st.metric("CASEL Tier", inv['casel_tier'].title())
+                with inv_cols[2]:
+                    st.metric("Continuity", f"{inv['continuity_years']} yrs")
+                with inv_cols[3]:
+                    chks = "Yes" if inv['chks_participant'] else "No"
+                    st.metric("CHKS", chks)
+                with inv_cols[4]:
+                    st.metric("Priority 6", f"{inv['priority6_score']:.1f}/4")
+
+                st.metric("Investment Index Total", f"{selected['investment_index']:.1f} / 100")
+            else:
+                st.warning("No investment data available")
+
+            # Outcome breakdown
+            st.markdown("#### Outcome Index Breakdown")
+            if out:
+                out_cols = st.columns(5)
+                with out_cols[0]:
+                    arrow = "↓" if out['type4_gap_trend'] < 0 else "↑"
+                    st.metric("Type 4 Trend", f"{out['type4_gap_trend']:+.1f}", delta=f"{arrow} {'Improving' if out['type4_gap_trend'] < 0 else 'Worsening'}")
+                with out_cols[1]:
+                    st.metric("RFEP Rate", f"{out['rfep_rate']:.1f}%")
+                with out_cols[2]:
+                    st.metric("Absenteeism", f"{out['absenteeism_rate']:.1f}%")
+                with out_cols[3]:
+                    st.metric("Suspension", f"{out['suspension_rate']:.1f}%")
+                with out_cols[4]:
+                    st.metric("EL Progress", f"{out['el_progress_score']:.1f}/4")
+
+                st.metric("Outcome Index Total", f"{selected['outcome_index']:.1f} / 100")
+            else:
+                st.warning("No outcome data available")
+
+            # Context
+            st.markdown("#### Context Adjustment")
+            if ctx:
+                ctx_cols = st.columns(4)
+                with ctx_cols[0]:
+                    st.metric("UPP%", f"{ctx['upp_pct']:.1f}%")
+                with ctx_cols[1]:
+                    st.metric("EL%", f"{ctx['el_pct']:.1f}%")
+                with ctx_cols[2]:
+                    st.metric("Size", ctx['enrollment_band'].title())
+                with ctx_cols[3]:
+                    st.metric("Context Adj.", f"{selected['context_adjustment']:.3f}×")
+
+            # Download report
+            st.markdown("---")
+            report_text = f"""
+================================================================================
+VERA SEL Δ DISTRICT BRIEF
+H-EDU.Solutions | {pd.Timestamp.now().strftime('%B %d, %Y')}
+================================================================================
+
+District:  {selected_district_name}
+CDE ID:    {selected['district_id']}
+County:    {selected['county']}
+
+── SEL Δ SUMMARY ───────────────────────────────────────────────────────────────
+Investment Index:   {selected['investment_index']:>6.1f} / 100
+Outcome Index:      {selected['outcome_index']:>6.1f} / 100
+Expected Outcome:   {selected['expected_outcome']:>6.1f}
+SEL Δ:              {selected['sel_delta']:>+6.1f}
+Zone:               {ZONE_EMOJI.get(selected['zone'], '')} {selected['zone'].upper()}
+
+── INTERPRETATION ──────────────────────────────────────────────────────────────
+{zone_desc.get(selected['zone'], '')}
+
+── SEL INVESTMENT PROFILE ──────────────────────────────────────────────────────
+Program:            {(inv['program_name'] if inv else 'Not identified') or 'Not identified'}
+CASEL Tier:         {(inv['casel_tier'].title() if inv else 'None')}
+Continuity:         {(str(inv['continuity_years']) + ' years' if inv else 'Unknown')}
+CHKS Participant:   {'Yes' if inv and inv['chks_participant'] else 'No'}
+
+── CONTEXT ─────────────────────────────────────────────────────────────────────
+Unduplicated Pupil: {ctx['upp_pct']:.1f}% if ctx else 'N/A'
+EL Concentration:   {ctx['el_pct']:.1f}% if ctx else 'N/A'
+Context Adj.:       {selected['context_adjustment']:.3f}×
+
+================================================================================
+VERA v2.0 | SEL Δ Module | H-EDU.Solutions
+vera-app-lh4t.onrender.com | h-edu.solutions
+================================================================================
+            """
+
+            st.download_button(
+                label="Download SEL Δ Report",
+                data=report_text,
+                file_name=f"vera_sel_delta_{selected['district_id']}.txt",
+                mime="text/plain"
+            )
+
+    else:
+        st.info("No SEL Delta data available. Run computation first.")
 
 # =============================================================================
 # Page: Cross-District Scan
@@ -1285,13 +1657,22 @@ elif page == "ℹ️ About VERA":
     - **CAASPP** — California Assessment of Student Performance and Progress
     - **ELPAC** — English Language Proficiency Assessments for California
 
-    ### The Five VERA Tools
+    ### VERA Measures Two Things No Other California Instrument Measures
 
-    1. **list_districts()** — List all districts in the database
-    2. **fetch_caaspp_results()** — Get CAASPP data for a district
-    3. **compute_oral_written_delta()** — Identify Type 4 gaps
-    4. **flag_type4_candidates()** — Statewide scan for flags
-    5. **get_lcap_match_summary()** — LCAP verification for COE
+    **1. The Type 4 Gap**
+    The distance between what a student can say (ELPAC Speaking) and what they can write (CAASPP ELA Claim 2). Computed at the district level by grade and subgroup.
+
+    **2. The SEL Δ (NEW in v2.0)**
+    The distance between what a district has invested in social-emotional learning and what its students are showing in outcome data over the same period.
+
+    SEL Δ = Expected Outcome (Investment, Context) − Actual Outcome
+
+    | SEL Δ Range | Zone | Meaning |
+    |-------------|------|---------|
+    | < −10 | 🟢 Outperforming | Outcomes exceed investment — study this district |
+    | −10 to +10 | 🔵 Aligned | Investment and outcomes tracking together |
+    | +10 to +25 | 🟡 Lagging | Outcomes behind investment — investigate fidelity |
+    | > +25 | 🔴 Disconnected | Data, delivery, or measurement failure |
 
     ### Non-Evaluation Guarantee
 
